@@ -28,6 +28,7 @@ import (
 	"github.com/dexidp/dex/connector/mock"
 	"github.com/dexidp/dex/connector/oidc"
 	"github.com/dexidp/dex/connector/saml"
+	"github.com/dexidp/dex/connector/twitter"
 	"github.com/dexidp/dex/pkg/log"
 	"github.com/dexidp/dex/storage"
 	"github.com/felixge/httpsnoop"
@@ -458,6 +459,7 @@ var ConnectorsConfig = map[string]func() ConnectorConfig{
 	"authproxy":       func() ConnectorConfig { return new(authproxy.Config) },
 	"linkedin":        func() ConnectorConfig { return new(linkedin.Config) },
 	"microsoft":       func() ConnectorConfig { return new(microsoft.Config) },
+	"twitter":         func() ConnectorConfig { return new(twitter.Config) },
 	"bitbucket-cloud": func() ConnectorConfig { return new(bitbucketcloud.Config) },
 	// Keep around for backwards compatibility.
 	"samlExperimental": func() ConnectorConfig { return new(saml.Config) },
