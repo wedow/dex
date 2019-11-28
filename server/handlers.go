@@ -719,6 +719,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthCode(w, r, client)
 	case grantTypeRefreshToken:
 		s.handleRefreshToken(w, r, client)
+	case grantTypeTokenExchange:
+		s.handleExchangeToken(w, r, client)
 	default:
 		s.tokenErrHelper(w, errInvalidGrant, "", http.StatusBadRequest)
 	}
@@ -1096,6 +1098,144 @@ func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(claims)
+}
+
+func (s *Server) handleExchangeToken(w http.ResponseWriter, r *http.Request, client storage.Client) {
+	subjectToken := r.PostFormValue("subject_token")
+
+	if subjectToken == "" {
+		s.logger.Errorf("no subject token")
+		s.tokenErrHelper(w, errInvalidRequest, "subject_token is not provided.", http.StatusBadRequest)
+	}
+
+	tokenType := r.PostFormValue("requested_token_type")
+
+	if tokenType == "" {
+		s.logger.Errorf("no token type")
+		s.tokenErrHelper(w, errInvalidRequest, "requested_issuer is not provided.", http.StatusBadRequest)
+	}
+
+	issuer := r.PostFormValue("requested_issuer")
+
+	if issuer == "" {
+		s.logger.Errorf("no issuer", issuer)
+		s.tokenErrHelper(w, errInvalidRequest, "requested_issuer is not provided.", http.StatusBadRequest)
+	}
+
+	conn, err := s.getConnector(issuer)
+	// _, err := s.getConnector(issuer)
+	if err != nil {
+		s.logger.Errorf("connector with ID %q not found: %v", issuer, err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return
+	}
+
+	verifier := oidc.NewVerifier(s.issuerURL.String(), &storageKeySet{s.storage}, &oidc.Config{SkipClientIDCheck: true})
+
+	token, err := verifier.Verify(r.Context(), subjectToken)
+	if err != nil {
+		s.logger.Errorf("connector with ID %q not found: %v", issuer, err)
+		s.tokenErrHelper(w, errAccessDenied, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	var claims idTokenClaims
+	token.Claims(&claims)
+
+	if claims.FederatedIDClaims == nil {
+		s.logger.Errorf("nil claims 2")
+		// TODO: onat
+		return
+	}
+
+	offlineSessions, err := s.storage.GetOfflineSessions(claims.FederatedIDClaims.UserID, issuer)
+	s.logger.Infof("aud id: %v", token.Audience)
+	s.logger.Infof("client id: %v", client.ID)
+	s.logger.Infof("offline sessions: %v", offlineSessions)
+	s.logger.Infof("offline sessions error: %v", err)
+	for k, v:= range offlineSessions.Refresh {
+		s.logger.Infof("id: %v", k)
+		s.logger.Infof("ref: %v", *v)
+	}
+	if err != nil {
+		if err == storage.ErrNotFound {
+			// This means that this user-client pair does not have a refresh token yet.
+			// An empty list should be returned instead of an error.
+			// TODO: onat
+		}
+		s.logger.Errorf("failed to list refresh tokens %t here : %v", err == storage.ErrNotFound, err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return
+	}
+
+	refreshRef := offlineSessions.Refresh[token.Audience[0]]
+
+	if refreshRef == nil {
+		// TODO: onat
+		s.logger.Errorf("nil refreshRef")
+	}
+
+	refresh, err := s.storage.GetRefresh(refreshRef.ID)
+	if err != nil {
+		s.logger.Errorf("failed to get refresh token: %v", err)
+		if err == storage.ErrNotFound {
+			// TODO: onat
+			s.tokenErrHelper(w, errInvalidRequest, "Refresh token is invalid or has already been claimed by another client.", http.StatusBadRequest)
+		} else {
+			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		}
+		return
+	}
+	// if refresh.ClientID != client.ID {
+	// 	s.logger.Errorf("client %s trying to claim token for client %s", client.ID, refresh.ClientID)
+	// 	s.tokenErrHelper(w, errInvalidRequest, "Refresh token is invalid or has already been claimed by another client.", http.StatusBadRequest)
+	// 	return
+	// }
+	// if refresh.Token != subjectToken {
+	// 	s.logger.Errorf("refresh token with id %s claimed twice", refresh.ID)
+	// 	s.tokenErrHelper(w, errInvalidRequest, "Refresh token is invalid or has already been claimed by another client.", http.StatusBadRequest)
+	// 	return
+	// }
+
+	ident := connector.Identity{
+		UserID:        refresh.Claims.UserID,
+		Username:      refresh.Claims.Username,
+		Email:         refresh.Claims.Email,
+		EmailVerified: refresh.Claims.EmailVerified,
+		Groups:        refresh.Claims.Groups,
+		ConnectorData: refresh.ConnectorData,
+	}
+
+	// Can the connector refresh the identity? If so, attempt to refresh the data
+	// in the connector.
+
+	// TODO(ericchiang): We may want a strict mode where connectors that don't implement
+	// this interface can't perform refreshing.
+	// TODO: onat
+	// add a new interface to get identity instead of calling Refresh()
+	if refreshConn, ok := conn.Connector.(connector.RefreshConnector); ok {
+		newIdent, err := refreshConn.Refresh(r.Context(), parseScopes([]string{}), ident)
+		if err != nil {
+			s.logger.Errorf("failed to refresh identity: %v", err)
+			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+			return
+		}
+		ident = newIdent
+	}
+
+	type connectorData struct {
+		AccessToken string `json:"accessToken"`
+	}
+
+	var data connectorData
+	if err := json.Unmarshal(refresh.ConnectorData, &data); err != nil {
+		s.logger.Errorf("failed to unmarshal access token: %v", err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(refresh.ConnectorData)))
+	w.Write(refresh.ConnectorData)
 }
 
 func (s *Server) writeAccessToken(w http.ResponseWriter, idToken, accessToken, refreshToken string, expiry time.Time) {

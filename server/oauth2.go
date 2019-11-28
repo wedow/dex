@@ -121,6 +121,15 @@ const (
 const (
 	grantTypeAuthorizationCode = "authorization_code"
 	grantTypeRefreshToken      = "refresh_token"
+	grantTypeTokenExchange     = "urn:ietf:params:oauth:grant-type:token-exchange"
+)
+
+const (
+	requestedTokenType = "requested_token_type=urn:ietf:params:oauth:token-type:access_token"
+)
+
+const (
+	requestedIssuer = "requested_issuer"
 )
 
 const (
